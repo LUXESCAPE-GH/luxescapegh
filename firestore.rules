@@ -19,11 +19,26 @@ service cloud.firestore {
       allow read: if owns(uid) || isAdmin();
       allow create: if owns(uid)
         && request.resource.data.uid == uid
-        && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'phone', 'createdAt'])
-        && request.resource.data.createdAt == request.time;
+        && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'phone', 'createdAt', 'visitCount', 'lastVisitAt'])
+        && request.resource.data.createdAt == request.time
+        && (
+          !request.resource.data.keys().hasAny(['visitCount', 'lastVisitAt'])
+          || (
+            request.resource.data.visitCount == 1
+            && request.resource.data.lastVisitAt == request.time
+          )
+        );
       allow update: if owns(uid)
         && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['displayName', 'phone', 'photoURL', 'updatedAt'])
+          .hasOnly(['displayName', 'phone', 'photoURL', 'updatedAt', 'visitCount', 'lastVisitAt'])
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['visitCount', 'lastVisitAt'])
+          || (
+            request.resource.data.diff(resource.data).affectedKeys().hasAll(['visitCount', 'lastVisitAt'])
+            && request.resource.data.visitCount == resource.data.get('visitCount', 0) + 1
+            && request.resource.data.lastVisitAt == request.time
+          )
+        )
         && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
       allow delete: if isAdmin();
     }

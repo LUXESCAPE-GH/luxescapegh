@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import {
-  addDoc, collection, deleteDoc, deleteField, doc, getDoc, onSnapshot, orderBy, query, runTransaction,
+  addDoc, collection, deleteDoc, deleteField, doc, getDoc, increment, onSnapshot, orderBy, query, runTransaction,
   serverTimestamp, setDoc, updateDoc, where,
 } from 'firebase/firestore'
 import {
@@ -9,9 +9,9 @@ import {
   signInWithPopup, signOut, updateProfile, type User,
 } from 'firebase/auth'
 import {
-  ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check,
+  ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, ChevronDown,
   Compass, MapPin, Menu, MessageCircle,
-  Minus, MoveUpRight, Plus, ShieldCheck, Sparkles, Users, X,
+  Minus, MoveUpRight, Pause, Play, Plus, ShieldCheck, Users, X,
 } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -39,6 +39,7 @@ type Trip = {
 }
 
 type Experience = {
+  id?: string
   title: string
   kind: string
   place: string
@@ -61,6 +62,16 @@ type SiteMedia = {
   imagePositionX?: number
   imagePositionY?: number
   imageZoom?: number
+  published?: boolean
+}
+type UserProfile = {
+  uid: string
+  displayName?: string
+  email?: string
+  phone?: string
+  visitCount?: number
+  lastVisitAt?: { toDate: () => Date }
+  createdAt?: { toDate: () => Date }
 }
 type GalleryAlbum = { id: string; title: string; description?: string; location?: string; coverUrl?: string; coverPublicId?: string; imagePositionX?: number; imagePositionY?: number; imageZoom?: number; published: boolean; createdAt?: { toMillis: () => number } }
 type GalleryMedia = { id: string; albumId?: string; title: string; caption?: string; type: 'image' | 'video'; url: string; cloudinaryPublicId?: string; imagePositionX?: number; imagePositionY?: number; imageZoom?: number; published: boolean; createdAt?: { toMillis: () => number } }
@@ -87,19 +98,60 @@ const photos = {
   ],
 }
 
-const SITE_IMAGE_SLOTS = [
+const SITE_IMAGE_SLOTS: { id: string; title: string; placement: string; type: 'image' }[] = [
   { id: 'brand-logo', title: 'Website logo', placement: 'Header, account and footer', type: 'image' },
   { id: 'hero-1', title: 'Hero slide 1', placement: 'Homepage opening slideshow', type: 'image' },
   { id: 'hero-2', title: 'Hero slide 2', placement: 'Homepage opening slideshow', type: 'image' },
   { id: 'hero-3', title: 'Hero slide 3', placement: 'Homepage opening slideshow', type: 'image' },
   { id: 'about-feature', title: 'About feature', placement: 'About section feature photo', type: 'image' },
-  { id: 'experience-1', title: 'Experience card 1', placement: 'Experience cards', type: 'image' },
-  { id: 'experience-2', title: 'Experience card 2', placement: 'Experience cards', type: 'image' },
-  { id: 'experience-3', title: 'Experience card 3', placement: 'Experience cards', type: 'image' },
   { id: 'quote-background', title: 'Closing feature', placement: 'Homepage closing quote section', type: 'image' },
 ]
+const HERO_SLOT_PATTERN = /^hero-(\d+)$/
+const EXPERIENCE_SLOT_PATTERN = /^experience-(\d+)$/
+type SiteImageSlot = { id: string; title: string; placement: string; type: 'image' } | { id: 'add-hero-slide' | 'add-memory-preview'; type: 'action' }
 const MAX_MEDIA_SIZE = 20 * 1024 * 1024 - 1
 const SITE_MEDIA_CACHE_KEY = 'lux-escape-published-site-media-v1'
+
+function getSiteImageSlots(siteMedia: Record<string, SiteMedia>): SiteImageSlot[] {
+  const extraHeroIndexes = [...new Set(Object.keys(siteMedia).flatMap((id) => {
+    const match = id.match(HERO_SLOT_PATTERN)
+    if (!match) return []
+    const index = Number(match[1])
+    return index > photos.hero.length ? [index] : []
+  }))].sort((a, b) => a - b)
+  const extraIndexes = [...new Set(Object.keys(siteMedia).flatMap((id) => {
+    const match = id.match(EXPERIENCE_SLOT_PATTERN)
+    if (!match) return []
+    const index = Number(match[1])
+    return index > photos.experience.length ? [index] : []
+  }))].sort((a, b) => a - b)
+  const heroSlots = [...Array.from({ length: photos.hero.length }, (_, index) => index + 1), ...extraHeroIndexes].map((index) => ({
+    id: `hero-${index}`,
+    title: `Hero slide ${index}`,
+    placement: 'Homepage opening slideshow',
+    type: 'image' as const,
+  }))
+  const experienceSlots = [...Array.from({ length: photos.experience.length }, (_, index) => index + 1), ...extraIndexes].map((index) => ({
+    id: `experience-${index}`,
+    title: `Memories preview card ${index}`,
+    placement: 'Homepage Memories preview',
+    type: 'image' as const,
+  }))
+  return [
+    SITE_IMAGE_SLOTS[0],
+    ...heroSlots,
+    { id: 'add-hero-slide', type: 'action' as const },
+    SITE_IMAGE_SLOTS[4],
+    ...experienceSlots,
+    { id: 'add-memory-preview', type: 'action' as const },
+    ...SITE_IMAGE_SLOTS.slice(5),
+  ]
+}
+
+function getSiteImageSlotTitle(siteMedia: Record<string, SiteMedia>, slotId: string) {
+  const slot = getSiteImageSlots(siteMedia).find((candidate): candidate is Extract<SiteImageSlot, { type: 'image' }> => candidate.type === 'image' && candidate.id === slotId)
+  return slot?.title || slotId
+}
 
 function readCachedSiteMedia(): Record<string, SiteMedia> {
   try {
@@ -107,11 +159,11 @@ function readCachedSiteMedia(): Record<string, SiteMedia> {
     if (!raw) return {}
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return {}
-    return Object.fromEntries(SITE_IMAGE_SLOTS.flatMap((slot) => {
-      const item = (parsed as Record<string, unknown>)[slot.id]
+    return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).flatMap(([id, item]) => {
+      if (!SITE_IMAGE_SLOTS.some((slot) => slot.id === id) && !EXPERIENCE_SLOT_PATTERN.test(id) && !HERO_SLOT_PATTERN.test(id)) return []
       if (typeof item !== 'object' || item === null) return []
       const cached = item as Record<string, unknown>
-      const media: SiteMedia = { id: slot.id }
+      const media: SiteMedia = { id }
       if (typeof cached.url === 'string' && /^https?:\/\//i.test(cached.url)) media.url = cached.url
       if (typeof cached.cloudinaryPublicId === 'string') media.cloudinaryPublicId = cached.cloudinaryPublicId
       for (const key of ['heroEyebrow', 'heroHeadline', 'heroHeadlineEmphasis', 'heroDescription', 'experienceTitle', 'experienceKind', 'experiencePlace'] as const) {
@@ -120,7 +172,8 @@ function readCachedSiteMedia(): Record<string, SiteMedia> {
       for (const key of ['imagePositionX', 'imagePositionY', 'imageZoom'] as const) {
         if (typeof cached[key] === 'number' && Number.isFinite(cached[key])) media[key] = cached[key]
       }
-      return Object.keys(media).length > 1 ? [[slot.id, media]] : []
+      if (typeof cached.published === 'boolean') media.published = cached.published
+      return Object.keys(media).length > 1 ? [[id, media]] : []
     }))
   } catch (reason) {
     console.warn('Unable to read cached website images:', reason)
@@ -130,10 +183,21 @@ function readCachedSiteMedia(): Record<string, SiteMedia> {
 
 function defaultSiteImage(slotId: string) {
   if (slotId === 'brand-logo') return '/images/logo.png'
-  if (slotId.startsWith('hero-')) return photos.hero[Number(slotId.slice(-1)) - 1]?.image || photos.hero[0].image
-  if (slotId.startsWith('experience-')) return photos.experience[Number(slotId.slice(-1)) - 1]?.image || photos.experience[0].image
+  const heroSlot = slotId.match(HERO_SLOT_PATTERN)
+  if (heroSlot) return photos.hero[Number(heroSlot[1]) - 1]?.image || photos.hero[0].image
+  const experienceSlot = slotId.match(EXPERIENCE_SLOT_PATTERN)
+  if (experienceSlot) return photos.experience[Number(experienceSlot[1]) - 1]?.image || photos.experience[0].image
   if (slotId === 'about-feature') return 'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=1800&q=85'
   return 'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=2000&q=85'
+}
+
+function defaultExperience(index: number) {
+  return photos.experience[index] || {
+    title: `Your next escape ${index + 1}`,
+    kind: 'YOUR NEXT ESCAPE',
+    place: 'Ghana',
+    image: photos.experience[0].image,
+  }
 }
 
 function imageFitStyle(item?: Partial<ImageFit>): React.CSSProperties {
@@ -152,9 +216,7 @@ function siteImageAspectRatio(slotId: string) {
   if (slotId.startsWith('hero-')) return 16 / 7
   if (slotId === 'brand-logo') return 4
   if (slotId === 'about-feature') return 1.2
-  if (slotId === 'experience-1') return 1
-  if (slotId === 'experience-2') return 1
-  if (slotId === 'experience-3') return 0.86
+  if (EXPERIENCE_SLOT_PATTERN.test(slotId)) return 1
   if (slotId === 'quote-background') return 2
   return 1.5
 }
@@ -162,8 +224,7 @@ function siteImageAspectRatio(slotId: string) {
 function siteImageMobileAspectRatio(slotId: string) {
   if (slotId.startsWith('hero-')) return 0.8
   if (slotId === 'about-feature') return 1.17
-  if (slotId === 'experience-1' || slotId === 'experience-3') return 0.6
-  if (slotId === 'experience-2') return 1.12
+  if (EXPERIENCE_SLOT_PATTERN.test(slotId)) return 0.9
   if (slotId === 'quote-background') return 1
   return siteImageAspectRatio(slotId)
 }
@@ -195,6 +256,7 @@ function uploadErrorMessage(reason: unknown) {
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authReady, setAuthReady] = useState(false)
+  const trackedSessions = useRef(new Set<string>())
 
   useEffect(() => {
     if (!auth) {
@@ -206,6 +268,51 @@ function App() {
       setAuthReady(true)
     })
   }, [])
+
+  useEffect(() => {
+    if (!db || !user) return
+    if (trackedSessions.current.has(user.uid)) return
+    const visitKey = `lux-escape-visit:${user.uid}`
+    let sessionStorageAvailable = true
+    try {
+      if (window.sessionStorage.getItem(visitKey)) return
+      window.sessionStorage.setItem(visitKey, 'counting')
+    } catch (reason) {
+      sessionStorageAvailable = false
+      console.warn('Unable to access session storage for visit tracking:', reason)
+    }
+    trackedSessions.current.add(user.uid)
+    const profileRef = doc(db, 'users', user.uid)
+    runTransaction(db, async (transaction) => {
+      const profile = await transaction.get(profileRef)
+      if (profile.exists()) {
+        transaction.update(profileRef, { visitCount: increment(1), lastVisitAt: serverTimestamp() })
+      } else {
+        transaction.set(profileRef, {
+          uid: user.uid,
+          displayName: user.displayName || '',
+          email: user.email || '',
+          phone: user.phoneNumber || '',
+          createdAt: serverTimestamp(),
+          visitCount: 1,
+          lastVisitAt: serverTimestamp(),
+        })
+      }
+    })
+      .then(() => {
+        if (!sessionStorageAvailable) return
+        try { window.sessionStorage.setItem(visitKey, 'counted') }
+        catch (reason) { console.warn('Unable to save the visit tracking session:', reason) }
+      })
+      .catch((reason) => {
+        console.error('Unable to record user visit:', reason)
+        trackedSessions.current.delete(user.uid)
+        if (sessionStorageAvailable) {
+          try { window.sessionStorage.removeItem(visitKey) }
+          catch (storageReason) { console.warn('Unable to reset the visit tracking session:', storageReason) }
+        }
+      })
+  }, [user])
 
   return (
     <BrowserRouter>
@@ -334,7 +441,7 @@ function Header({ user, onAuth, overHero = false }: { user: User | null; onAuth:
       window.removeEventListener('resize', update)
     }
   }, [])
-  const links = [['About', '/#about'], ['Experiences', '/#experiences'], ['Upcoming events & trips', '/#trips'], ['Memories', '/memories'], ['Contact', '/#contact']]
+  const links = [['About', '/#about'], ['Upcoming events & trips', '/#trips'], ['Memories', '/memories'], ['Contact', '/#contact']]
   return <header className={`site-header ${scrolled ? 'is-scrolled' : ''} ${logoOnLightBackground ? 'logo-on-light' : ''} ${overHero ? 'site-header-over-hero' : ''}`}>
     <div className="nav-shell">
       <Brand inverse={overHero && !scrolled} adaptColor={scrolled} logoOnLight={logoOnLightBackground} />
@@ -364,11 +471,21 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
   const [trips, setTrips] = useState<Trip[]>([])
   const reducedMotion = useReducedMotion()
   const [slide, setSlide] = useState(0)
+  const [memoriesIndex, setMemoriesIndex] = useState(0)
+  const [memoriesStep, setMemoriesStep] = useState(450)
+  const [memoriesPaused, setMemoriesPaused] = useState(false)
+  const [memoriesHovered, setMemoriesHovered] = useState(false)
   const heroSwipe = useRef<{ x: number; y: number; pointerId: number } | null>(null)
+  const memoriesSwipe = useRef<{ x: number; y: number; pointerId: number } | null>(null)
+  const memoriesWheelDelta = useRef(0)
+  const memoriesWheelLastMove = useRef(0)
+  const suppressMemoryClickUntil = useRef(0)
+  const memoriesStage = useRef<HTMLDivElement>(null)
   const heroPhotos = photos.hero.map((photo, index) => {
     const media = siteMedia[`hero-${index + 1}`]
     return {
       ...photo,
+      id: `hero-${index + 1}`,
       image: media?.url || photo.image,
       imageFit: media,
       eyebrow: media?.heroEyebrow || photo.place,
@@ -377,9 +494,30 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
       description: media?.heroDescription || '',
     }
   })
+  const additionalHeroPhotos = Object.entries(siteMedia)
+    .flatMap(([id, media]) => {
+      const match = id.match(HERO_SLOT_PATTERN)
+      const index = match ? Number(match[1]) - 1 : -1
+      if (index < photos.hero.length || media.published === false) return []
+      const fallback = photos.hero[index] || photos.hero[0]
+      return [{
+        ...fallback,
+        ...media,
+        place: media.heroEyebrow || fallback.place,
+        image: media.url || fallback.image,
+        imageFit: media,
+        eyebrow: media.heroEyebrow || fallback.place,
+        headline: media.heroHeadline || '',
+        headlineEmphasis: media.heroHeadlineEmphasis || '',
+        description: media.heroDescription || '',
+      }]
+    })
+    .sort((a, b) => Number(a.id.match(HERO_SLOT_PATTERN)?.[1]) - Number(b.id.match(HERO_SLOT_PATTERN)?.[1]))
+  const allHeroPhotos = [...heroPhotos, ...additionalHeroPhotos]
   const experiencePhotos = photos.experience.map((photo, index) => {
     const media = siteMedia[`experience-${index + 1}`]
     return {
+      id: `experience-${index + 1}`,
       ...photo,
       image: media?.url || photo.image,
       title: media?.experienceTitle || photo.title,
@@ -388,14 +526,87 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
       imageFit: media,
     }
   })
+  const additionalExperiencePhotos = Object.entries(siteMedia)
+    .flatMap(([id, media]) => {
+      const match = id.match(EXPERIENCE_SLOT_PATTERN)
+      const index = match ? Number(match[1]) - 1 : -1
+      if (index < photos.experience.length || !media.url || media.published === false) return []
+      const fallback = defaultExperience(index)
+      return [{
+        id,
+        ...fallback,
+        image: media.url,
+        title: media.experienceTitle || fallback.title,
+        kind: media.experienceKind || fallback.kind,
+        place: media.experiencePlace || fallback.place,
+        imageFit: media,
+      }]
+    })
+    .sort((a, b) => Number(a.id.match(EXPERIENCE_SLOT_PATTERN)?.[1]) - Number(b.id.match(EXPERIENCE_SLOT_PATTERN)?.[1]))
+  const allExperiencePhotos = [...experiencePhotos, ...additionalExperiencePhotos]
+  const activeMemoriesIndex = memoriesIndex % allExperiencePhotos.length
+  const activeHeroSlide = slide % allHeroPhotos.length
 
   useEffect(() => {
-    if (reducedMotion || heroPhotos.length < 2) return
-    const timer = window.setTimeout(() => setSlide((value) => (value + 1) % heroPhotos.length), 7000)
+    if (reducedMotion || allHeroPhotos.length < 2) return
+    const timer = window.setTimeout(() => setSlide((value) => (value + 1) % allHeroPhotos.length), 7000)
     return () => window.clearTimeout(timer)
-  }, [reducedMotion, heroPhotos.length, slide])
+  }, [reducedMotion, allHeroPhotos.length, slide])
 
-  const moveHero = (direction: -1 | 1) => setSlide((current) => (current + direction + heroPhotos.length) % heroPhotos.length)
+  useEffect(() => {
+    const stage = memoriesStage.current
+    const card = stage?.querySelector<HTMLElement>('.experience-card')
+    if (!stage || !card) return
+    const updateStep = () => {
+      const gap = Number.parseFloat(getComputedStyle(stage).getPropertyValue('--memories-gap')) || 16
+      setMemoriesStep(card.getBoundingClientRect().width + gap)
+    }
+    updateStep()
+    const observer = new ResizeObserver(updateStep)
+    observer.observe(card)
+    return () => observer.disconnect()
+  }, [allExperiencePhotos.length])
+
+  useEffect(() => {
+    if (reducedMotion || memoriesPaused || memoriesHovered || allExperiencePhotos.length < 2) return
+    const timer = window.setTimeout(() => setMemoriesIndex((index) => (index + 1) % allExperiencePhotos.length), 4800)
+    return () => window.clearTimeout(timer)
+  }, [allExperiencePhotos.length, memoriesHovered, memoriesPaused, memoriesIndex, reducedMotion])
+
+  useEffect(() => {
+    const stage = memoriesStage.current
+    if (!stage) return
+    const handleWheel = (event: WheelEvent) => {
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX
+      if (Math.abs(horizontalDelta) < 1) return
+      event.preventDefault()
+      memoriesWheelDelta.current += horizontalDelta
+      if (Math.abs(memoriesWheelDelta.current) < 45 || performance.now() - memoriesWheelLastMove.current < 420) return
+      const direction = memoriesWheelDelta.current > 0 ? 1 : -1
+      memoriesWheelDelta.current = 0
+      memoriesWheelLastMove.current = performance.now()
+      setMemoriesIndex((index) => (index + direction + allExperiencePhotos.length) % allExperiencePhotos.length)
+    }
+    stage.addEventListener('wheel', handleWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', handleWheel)
+  }, [allExperiencePhotos.length])
+
+  const moveHero = (direction: -1 | 1) => setSlide((current) => (current + direction + allHeroPhotos.length) % allHeroPhotos.length)
+  const moveMemories = (direction: -1 | 1) => setMemoriesIndex((current) => (current + direction + allExperiencePhotos.length) % allExperiencePhotos.length)
+  const startMemoriesSwipe = (event: React.PointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('button, input, textarea')) return
+    memoriesSwipe.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId }
+  }
+  const finishMemoriesSwipe = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = memoriesSwipe.current
+    memoriesSwipe.current = null
+    if (!start || start.pointerId !== event.pointerId) return
+    const dx = event.clientX - start.x
+    const dy = event.clientY - start.y
+    if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy)) return
+    suppressMemoryClickUntil.current = performance.now() + 500
+    moveMemories(dx < 0 ? 1 : -1)
+  }
   const startHeroSwipe = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest('a, button, input, textarea')) {
       heroSwipe.current = null
@@ -444,21 +655,21 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 1.25, ease: 'easeInOut' }}>
-            <img src={heroPhotos[slide]?.image || photos.hero[0].image} alt="" style={imageFitStyle(heroPhotos[slide]?.imageFit)} />
+            <img src={allHeroPhotos[activeHeroSlide]?.image || photos.hero[0].image} alt="" style={imageFitStyle(allHeroPhotos[activeHeroSlide]?.imageFit)} />
           </motion.div>
         </AnimatePresence>
         <div className="hero-shade" />
         <div className="hero-content page-width">
           <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8 }}>
-            <div className="eyebrow eyebrow-light"><span /> {heroPhotos[slide]?.eyebrow || photos.hero[0].place}</div>
-            <h1>{heroPhotos[slide]?.headline || (user && authReady ? 'Welcome back.' : 'A little further.')}<br /><em>{heroPhotos[slide]?.headlineEmphasis || (user && authReady ? 'Where to next?' : 'A lot more alive.')}</em></h1>
-            <p>{heroPhotos[slide]?.description || 'Thoughtfully curated escapes for those who want to feel a place, not just see it.'}</p>
+            <div className="eyebrow eyebrow-light"><span /> {allHeroPhotos[activeHeroSlide]?.eyebrow || photos.hero[0].place}</div>
+            <h1>{allHeroPhotos[activeHeroSlide]?.headline || (user && authReady ? 'Welcome back.' : 'A little further.')}<br /><em>{allHeroPhotos[activeHeroSlide]?.headlineEmphasis || (user && authReady ? 'Where to next?' : 'A lot more alive.')}</em></h1>
+            <p>{allHeroPhotos[activeHeroSlide]?.description || 'Thoughtfully curated escapes for those who want to feel a place, not just see it.'}</p>
           </motion.div>
         </div>
         <div className="hero-meta page-width">
           <div className="hero-slider-controls">
             <button className="hero-arrow" onClick={() => moveHero(-1)} aria-label="Previous hero image"><ArrowLeft size={15} /></button>
-            <div className="hero-dots" aria-label="Choose hero image">{heroPhotos.map((item, index) => <button key={item.place} className={index === slide ? 'active' : ''} onClick={() => setSlide(index)} aria-label={`Show ${item.place}`} aria-current={index === slide ? 'true' : undefined} />)}</div>
+            <div className="hero-dots" aria-label="Choose hero image">{allHeroPhotos.map((item, index) => <button key={item.id || item.place} className={index === activeHeroSlide ? 'active' : ''} onClick={() => setSlide(index)} aria-label={`Show ${item.eyebrow || item.place}`} aria-current={index === activeHeroSlide ? 'true' : undefined} />)}</div>
             <button className="hero-arrow" onClick={() => moveHero(1)} aria-label="Next hero image"><ArrowRight size={15} /></button>
           </div>
           <span>GHANA, BEAUTIFULLY DISCOVERED</span>
@@ -467,18 +678,11 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
       </section>
 
       <section className="intro-section page-width" id="about">
-        <div className="intro-kicker"><span className="eyebrow">A DIFFERENT KIND OF GETAWAY</span><span className="line" /></div>
-        <div className="intro-grid">
-          <h2>Not just a place.<br />A feeling you <em>take home.</em></h2>
-          <div className="intro-copy">
-            <p>We believe the best journeys make room for wonder. LUX ESCAPE brings people together to discover Ghana through considered adventures, restorative retreats and the little moments in between.</p>
-            <a href="#experiences" className="text-link">A little about us <ArrowUpRight size={15} /></a>
-          </div>
-        </div>
+        <h2 className="intro-heading">Not just a place.<br />A feeling you <em>take home.</em></h2>
         <div className="intro-visual">
           <img src={siteMedia['about-feature']?.url || 'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=1800&q=85'} alt="Golden light over a quiet mountain lake" loading="lazy" style={imageFitStyle(siteMedia['about-feature'])} />
           <div className="visual-caption"><span>01 / THE ART OF GETTING AWAY</span><span>Take the long way. It’s worth it.</span></div>
-          <div className="intro-seal"><Sparkles size={16} /><span>CURATED<br />WITH CARE</span></div>
+          <div className="intro-seal"><Compass size={16} /><span>CURATED<br />WITH CARE</span></div>
         </div>
         <div className="values-row">
           <div><span>01</span><b>Thoughtfully curated</b><p>Every detail, with intention.</p></div>
@@ -488,24 +692,62 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
         </div>
       </section>
 
-      <section className="experiences-section" id="experiences">
+      <section className="experiences-section" id="memories">
         <div className="page-width">
-          <div className="section-heading">
-            <div><span className="eyebrow">THE GOOD KIND OF GETTING LOST</span><h2>Find your kind<br />of <em>somewhere.</em></h2></div>
-            <p>From green canopies to salt-air afternoons, find the kind of escape that feels like yours.</p>
+          <div className="section-heading memories-section-heading">
+            <h2>Find your kind<br />of <em>somewhere.</em></h2>
+            <div className="memories-slider-controls" aria-label="Scroll memories">
+              <button type="button" onClick={() => moveMemories(-1)} aria-label="Previous memory"><ArrowLeft size={17} /></button>
+              <button type="button" onClick={() => setMemoriesPaused((paused) => !paused)} disabled={Boolean(reducedMotion)} aria-label={reducedMotion ? 'Carousel paused due to reduced-motion preference' : memoriesPaused ? 'Play memories carousel' : 'Pause memories carousel'}>{memoriesPaused || reducedMotion ? <Play size={15} /> : <Pause size={15} />}</button>
+              <button type="button" onClick={() => moveMemories(1)} aria-label="Next memory"><ArrowRight size={17} /></button>
+            </div>
           </div>
-          <div className="experience-grid">
-            {experiencePhotos.map((item, i) => <ExperienceCard item={item} index={i} key={item.title} />)}
+          <div
+            className="memories-carousel-stage"
+            ref={memoriesStage}
+            role="region"
+            aria-roledescription="carousel"
+            aria-label="Homepage memories preview"
+            onMouseEnter={() => setMemoriesHovered(true)}
+            onMouseLeave={() => setMemoriesHovered(false)}
+            onFocusCapture={() => setMemoriesHovered(true)}
+            onPointerDown={startMemoriesSwipe}
+            onPointerUp={finishMemoriesSwipe}
+            onPointerCancel={() => { memoriesSwipe.current = null }}
+            onClickCapture={(event) => {
+              if (performance.now() < suppressMemoryClickUntil.current) {
+                event.preventDefault()
+                event.stopPropagation()
+              }
+            }}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMemoriesHovered(false)
+            }}
+          >
+            {allExperiencePhotos.map((item, index) => {
+              const half = Math.floor(allExperiencePhotos.length / 2)
+              const offset = ((index - activeMemoriesIndex + allExperiencePhotos.length + half) % allExperiencePhotos.length) - half
+              const distance = Math.abs(offset)
+              return <motion.div
+                className="memories-carousel-item"
+                key={item.id}
+                initial={false}
+                animate={{ x: offset * memoriesStep, rotateY: -offset * 24, scale: distance === 0 ? 1 : distance === 1 ? 0.84 : 0.68, opacity: distance <= 2 ? 1 : 0 }}
+                transition={{ type: reducedMotion ? 'tween' : 'spring', duration: reducedMotion ? 0 : 0.65, stiffness: 150, damping: 22 }}
+                transformTemplate={(_, transform) => `translate(-50%, -50%) ${transform}`}
+                style={{ zIndex: allExperiencePhotos.length - distance, pointerEvents: distance <= 1 ? 'auto' : 'none' }}
+                aria-hidden={distance > 1}
+              >
+                <ExperienceCard item={item} index={index} tabIndex={distance <= 1 ? 0 : -1} />
+              </motion.div>
+            })}
           </div>
-          <a className="text-link experience-more" href="#trips">Explore all experiences <ArrowUpRight size={16} /></a>
+          <span className="memories-carousel-count" aria-live="polite">{String(activeMemoriesIndex + 1).padStart(2, '0')} / {String(allExperiencePhotos.length).padStart(2, '0')}</span>
+          <Link className="text-link experience-more" to="/memories">Explore all past events <ArrowUpRight size={16} /></Link>
         </div>
       </section>
 
       <section className="trips-section page-width" id="trips">
-        <div className="section-heading trips-heading">
-          <div><span className="eyebrow">UPCOMING EVENTS & TRIPS</span><h2>Come along<br />for the <em>journey.</em></h2></div>
-          <p>Discover curated group trips, retreats and special events across Ghana.</p>
-        </div>
         {!isFirebaseConfigured && <div className="cms-notice"><ShieldCheck size={18} /><span>New escapes and events are being prepared. Check back soon for upcoming events and trips.</span></div>}
         {isFirebaseConfigured && trips.length === 0 && <div className="empty-trips"><Compass size={27} /><h3>Your next story is still being written.</h3><p>There are no upcoming events or trips just yet. Check back soon.</p></div>}
         {trips.length > 0 && <div className="trip-grid">{trips.slice(0, 3).map((trip) => <TripCard key={trip.id} trip={trip} onBook={() => book(trip)} />)}</div>}
@@ -526,13 +768,13 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
   </div>
 }
 
-function ExperienceCard({ item, index }: { item: Experience; index: number }) {
-  return <a className={`experience-card experience-${index + 1}`} href="#trips">
+function ExperienceCard({ item, index, tabIndex }: { item: Experience; index: number; tabIndex?: number }) {
+  return <Link className={`experience-card experience-${index + 1}`} to="/memories" tabIndex={tabIndex} aria-label={`${item.title} — ${item.place}. Explore memories`}>
     <img src={item.image} alt={`${item.title} — ${item.place}`} loading="lazy" style={imageFitStyle(item.imageFit)} />
     <div className="experience-wash" />
-    <span className="experience-index">0{index + 1}</span><span className="experience-kind">{item.kind}</span>
+    <span className="experience-index">{String(index + 1).padStart(2, '0')}</span><span className="experience-kind">{item.kind}</span>
     <div className="experience-card-bottom"><div><h3>{item.title}</h3><span><MapPin size={13} /> {item.place}</span></div><i><ArrowUpRight size={18} /></i></div>
-  </a>
+  </Link>
 }
 
 function MemoriesPage({ user }: { user: User | null }) {
@@ -612,9 +854,8 @@ function MemoryPlaylistPage({ user }: { user: User | null }) {
             ? <div className="memories-empty"><Compass size={30} /><h2>This playlist is on its way.</h2><p>Photos and videos from this escape will appear here.</p></div>
             : items.map((item) => <article className="memories-gallery-card" key={item.id}>
               {item.type === 'video'
-                ? <video src={item.url} aria-label={item.title} controls playsInline preload="metadata" />
-                : <img src={item.url} alt={item.title} loading="lazy" style={imageFitStyle(item)} />}
-              <div className="memories-gallery-caption"><h2>{item.title}</h2>{item.caption && <p>{item.caption}</p>}</div>
+                ? <video src={item.url} aria-label="Memory video" controls playsInline preload="metadata" />
+                : <img src={item.url} alt="" loading="lazy" />}
             </article>)}
       </section>
     </main>
@@ -639,7 +880,7 @@ function TripCard({ trip, onBook }: { trip: Trip; onBook: () => void }) {
 function Footer() {
   return <footer className="site-footer" id="contact">
     <div className="footer-main page-width"><div className="footer-brand"><Brand inverse /><p>Thoughtfully curated escapes, rooted in Ghana and made for the moments that stay.</p><button className="footer-contact" onClick={() => window.dispatchEvent(new Event('lux-open-support'))}>Talk to our team <ArrowUpRight size={14} /></button></div>
-      <div className="footer-links"><div><span>EXPLORE</span><a href="/#about">Our story</a><a href="/#experiences">Experiences</a><a href="/#trips">Upcoming events & trips</a><Link to="/memories">Memories</Link></div><div><span>GET IN TOUCH</span><button onClick={() => window.dispatchEvent(new Event('lux-open-support'))}>Customer support chat <ArrowUpRight size={13} /></button><a href="/#trips">Plan an escape <ArrowUpRight size={13} /></a></div></div></div>
+      <div className="footer-links"><div><span>EXPLORE</span><a href="/#about">Our story</a><a href="/#trips">Upcoming events & trips</a><Link to="/memories">Memories</Link></div><div><span>GET IN TOUCH</span><button onClick={() => window.dispatchEvent(new Event('lux-open-support'))}>Customer support chat <ArrowUpRight size={13} /></button><a href="/#trips">Plan an escape <ArrowUpRight size={13} /></a></div></div></div>
     <div className="footer-bottom page-width"><span>© {CURRENT_YEAR} LUX ESCAPE. MADE WITH A LITTLE MORE THOUGHT.</span><span>GHANA <span className="footer-dot">●</span></span><a href="#top" onClick={(event) => { event.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>BACK TO TOP ↑</a></div>
   </footer>
 }
@@ -804,7 +1045,7 @@ function AuthModal({ initialMode, close, returnTo = '/', adminOnly = false }: { 
       const profileRef = doc(db!, 'users', credential.user.uid)
       const profile = await getDoc(profileRef)
       if (!profile.exists()) {
-        await setDoc(profileRef, { uid: credential.user.uid, displayName: credential.user.displayName || '', email: credential.user.email || '', phone: '', createdAt: serverTimestamp() })
+        await setDoc(profileRef, { uid: credential.user.uid, displayName: credential.user.displayName || '', email: credential.user.email || '', phone: '', createdAt: serverTimestamp() }, { merge: true })
       }
       close(); navigate(returnTo)
     } catch (reason) { setError(firebaseMessage(reason)) } finally { setBusy(false) }
@@ -1087,21 +1328,22 @@ function SupportChat({ user, onSignIn }: { user: User | null; onSignIn: () => vo
   </div>
 }
 
-function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onReplaceEventImage, onResetEventImage, onError }: {
+function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, siteMediaExpanded, galleryExpanded, onToggleSiteMedia, onToggleGallery, onReplaceEventImage, onResetEventImage, onError }: {
   siteMedia: Record<string, SiteMedia>
   galleryItems: GalleryMedia[]
   galleryAlbums: GalleryAlbum[]
   events: Trip[]
+  siteMediaExpanded: boolean
+  galleryExpanded: boolean
+  onToggleSiteMedia: () => void
+  onToggleGallery: () => void
   onReplaceEventImage: (event: Trip, file: File, fit: ImageFit) => Promise<boolean | string>
   onResetEventImage: (event: Trip) => Promise<void>
   onError: (message: string) => void
 }) {
   const [busySlot, setBusySlot] = useState('')
   const [galleryBusy, setGalleryBusy] = useState(false)
-  const [galleryTitle, setGalleryTitle] = useState('')
-  const [galleryCaption, setGalleryCaption] = useState('')
   const [galleryMediaFile, setGalleryMediaFile] = useState<File | null>(null)
-  const [galleryImageFit, setGalleryImageFit] = useState<ImageFit | null>(null)
   const [selectedAlbumId, setSelectedAlbumId] = useState('')
   const [albumTitle, setAlbumTitle] = useState('')
   const [albumLocation, setAlbumLocation] = useState('')
@@ -1128,12 +1370,17 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
 
   const replaceSiteImage = async (slotId: string, file: File, fit: ImageFit) => {
     if (!db) { setSiteMediaFeedback({ message: 'Firestore is not configured.', error: true }); return 'Firestore is not configured.' }
+    const experienceSlotMatch = slotId.match(EXPERIENCE_SLOT_PATTERN)
+    const heroSlotMatch = slotId.match(HERO_SLOT_PATTERN)
+    const isAdditionalExperience = Boolean(experienceSlotMatch && Number(experienceSlotMatch[1]) > photos.experience.length)
+    const isAdditionalHero = Boolean(heroSlotMatch && Number(heroSlotMatch[1]) > photos.hero.length)
+    const publishImage = !(isAdditionalExperience || isAdditionalHero) || siteMedia[slotId]?.published === true
     setBusySlot(slotId); setSiteMediaFeedback({ message: 'Uploading image to Cloudinary…', error: false }); onError('')
     let uploaded: { url: string; cloudinaryPublicId: string } | null = null
     try {
       uploaded = await uploadPublicMedia(file)
-      await setDoc(doc(db, 'websiteContent', slotId), { title: SITE_IMAGE_SLOTS.find((slot) => slot.id === slotId)?.title || slotId, url: uploaded.url, cloudinaryPublicId: uploaded.cloudinaryPublicId, ...fit, published: true, updatedAt: serverTimestamp() }, { merge: true })
-      setSiteMediaFeedback({ message: 'Image uploaded and saved. The website preview should update shortly.', error: false })
+      await setDoc(doc(db, 'websiteContent', slotId), { title: getSiteImageSlotTitle(siteMedia, slotId), url: uploaded.url, cloudinaryPublicId: uploaded.cloudinaryPublicId, ...fit, published: publishImage, updatedAt: serverTimestamp() }, { merge: true })
+      setSiteMediaFeedback({ message: isAdditionalExperience && !publishImage ? 'Image uploaded. Save the card text to publish this Memories preview.' : isAdditionalHero && !publishImage ? 'Image uploaded. Save the slide text to publish this hero slide.' : 'Image uploaded and saved. The website preview should update shortly.', error: false })
       return true
     } catch (reason) {
       const message = uploaded ? `${firebaseMessage(reason)} The upload succeeded, but the website image was not saved; remove the unused asset from Cloudinary.` : uploadErrorMessage(reason)
@@ -1149,13 +1396,17 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
     setBusySlot(slotId); setSiteMediaFeedback({ message: 'Resetting image…', error: false }); onError('')
     try {
       if ((slotId.startsWith('hero-') || slotId.startsWith('experience-')) && siteMedia[slotId]) {
+        const experienceSlotMatch = slotId.match(EXPERIENCE_SLOT_PATTERN)
+        const heroSlotMatch = slotId.match(HERO_SLOT_PATTERN)
+        const isUnpublishedAdditionalExperience = Boolean(experienceSlotMatch && Number(experienceSlotMatch[1]) > photos.experience.length && siteMedia[slotId].published === false)
+        const isUnpublishedAdditionalHero = Boolean(heroSlotMatch && Number(heroSlotMatch[1]) > photos.hero.length && siteMedia[slotId].published === false)
         await updateDoc(doc(db, 'websiteContent', slotId), {
           url: deleteField(),
           cloudinaryPublicId: deleteField(),
           imagePositionX: deleteField(),
           imagePositionY: deleteField(),
           imageZoom: deleteField(),
-          published: true,
+          published: !(isUnpublishedAdditionalExperience || isUnpublishedAdditionalHero),
           updatedAt: serverTimestamp(),
         })
       } else {
@@ -1168,6 +1419,103 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
       onError(message)
     }
     finally { setBusySlot('') }
+  }
+
+  const addExperienceSlot = async () => {
+    if (!db) return setSiteMediaFeedback({ message: 'Firestore is not configured.', error: true })
+    const highestIndex = Math.max(
+      photos.experience.length,
+      ...Object.keys(siteMedia).flatMap((id) => {
+        const match = id.match(EXPERIENCE_SLOT_PATTERN)
+        return match ? [Number(match[1])] : []
+      }),
+    )
+    const slotId = `experience-${highestIndex + 1}`
+    setBusySlot(slotId)
+    setSiteMediaFeedback({ message: 'Adding a Memories preview card…', error: false })
+    onError('')
+    try {
+      await setDoc(doc(db, 'websiteContent', slotId), {
+        title: `Memories preview card ${highestIndex + 1}`,
+        experienceTitle: 'A new escape',
+        experienceKind: 'YOUR NEXT ESCAPE',
+        experiencePlace: 'Ghana',
+        published: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      setSiteMediaFeedback({ message: 'Preview card added. Upload its image and save its text to publish it.', error: false })
+    } catch (reason) {
+      const message = firebaseMessage(reason)
+      setSiteMediaFeedback({ message, error: true })
+      onError(message)
+    } finally { setBusySlot('') }
+  }
+
+  const addHeroSlot = async () => {
+    if (!db) return setSiteMediaFeedback({ message: 'Firestore is not configured.', error: true })
+    const highestIndex = Math.max(
+      photos.hero.length,
+      ...Object.keys(siteMedia).flatMap((id) => {
+        const match = id.match(HERO_SLOT_PATTERN)
+        return match ? [Number(match[1])] : []
+      }),
+    )
+    const slotId = `hero-${highestIndex + 1}`
+    setBusySlot(slotId)
+    setSiteMediaFeedback({ message: 'Adding a hero slide…', error: false })
+    onError('')
+    try {
+      await setDoc(doc(db, 'websiteContent', slotId), {
+        title: `Hero slide ${highestIndex + 1}`,
+        heroEyebrow: 'A NEW GHANA ESCAPE',
+        heroHeadline: 'A little further.',
+        heroHeadlineEmphasis: 'A lot more alive.',
+        heroDescription: 'Thoughtfully curated escapes for those who want to feel a place, not just see it.',
+        published: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      setSiteMediaFeedback({ message: 'Hero slide added. Upload its image and save its text to publish it.', error: false })
+    } catch (reason) {
+      const message = firebaseMessage(reason)
+      setSiteMediaFeedback({ message, error: true })
+      onError(message)
+    } finally { setBusySlot('') }
+  }
+
+  const removeHeroSlot = async (slotId: string) => {
+    const match = slotId.match(HERO_SLOT_PATTERN)
+    if (!db || !match || Number(match[1]) <= photos.hero.length) return
+    if (!window.confirm('Remove this hero slide? Any uploaded image will remain in Cloudinary and must be removed there separately.')) return
+    setBusySlot(slotId)
+    setSiteMediaFeedback({ message: 'Removing hero slide…', error: false })
+    onError('')
+    try {
+      await deleteDoc(doc(db, 'websiteContent', slotId))
+      setSiteMediaFeedback({ message: 'Hero slide removed.', error: false })
+    } catch (reason) {
+      const message = firebaseMessage(reason)
+      setSiteMediaFeedback({ message, error: true })
+      onError(message)
+    } finally { setBusySlot('') }
+  }
+
+  const removeExperienceSlot = async (slotId: string) => {
+    const match = slotId.match(EXPERIENCE_SLOT_PATTERN)
+    if (!db || !match || Number(match[1]) <= photos.experience.length) return
+    if (!window.confirm('Remove this Memories preview card? Any uploaded image will remain in Cloudinary and must be removed there separately.')) return
+    setBusySlot(slotId)
+    setSiteMediaFeedback({ message: 'Removing Memories preview card…', error: false })
+    onError('')
+    try {
+      await deleteDoc(doc(db, 'websiteContent', slotId))
+      setSiteMediaFeedback({ message: 'Memories preview card removed.', error: false })
+    } catch (reason) {
+      const message = firebaseMessage(reason)
+      setSiteMediaFeedback({ message, error: true })
+      onError(message)
+    } finally { setBusySlot('') }
   }
 
   const saveHeroCopy = async (slotId: string, event: React.FormEvent<HTMLFormElement>) => {
@@ -1184,7 +1532,7 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
     setBusySlot(slotId); setSiteMediaFeedback({ message: 'Saving hero text…', error: false }); onError('')
     try {
       await setDoc(doc(db, 'websiteContent', slotId), {
-        title: SITE_IMAGE_SLOTS.find((slot) => slot.id === slotId)?.title || slotId,
+        title: getSiteImageSlotTitle(siteMedia, slotId),
         heroEyebrow,
         heroHeadline,
         heroHeadlineEmphasis,
@@ -1208,19 +1556,19 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
     const experienceKind = String(form.get('experienceKind') || '').trim()
     const experiencePlace = String(form.get('experiencePlace') || '').trim()
     if (!experienceTitle || !experienceKind || !experiencePlace) {
-      return setSiteMediaFeedback({ message: 'Complete all experience card text fields before saving.', error: true })
+      return setSiteMediaFeedback({ message: 'Complete all Memories preview card text fields before saving.', error: true })
     }
-    setBusySlot(slotId); setSiteMediaFeedback({ message: 'Saving experience card text…', error: false }); onError('')
+    setBusySlot(slotId); setSiteMediaFeedback({ message: 'Saving Memories preview card text…', error: false }); onError('')
     try {
       await setDoc(doc(db, 'websiteContent', slotId), {
-        title: SITE_IMAGE_SLOTS.find((slot) => slot.id === slotId)?.title || slotId,
+        title: getSiteImageSlotTitle(siteMedia, slotId),
         experienceTitle,
         experienceKind,
         experiencePlace,
         published: true,
         updatedAt: serverTimestamp(),
       }, { merge: true })
-      setSiteMediaFeedback({ message: 'Experience card text saved and published.', error: false })
+      setSiteMediaFeedback({ message: 'Memories preview card text saved and published.', error: false })
     } catch (reason) {
       const message = firebaseMessage(reason)
       setSiteMediaFeedback({ message, error: true })
@@ -1241,17 +1589,15 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
       uploaded = await uploadPublicMedia(file)
       await addDoc(collection(db, 'galleryMedia'), {
         albumId: selectedAlbumId,
-        title: galleryTitle.trim(),
-        caption: galleryCaption.trim(),
+        title: file.type.startsWith('video/') ? 'Video' : 'Photo',
         type: file.type.startsWith('video/') ? 'video' : 'image',
         url: uploaded.url,
         cloudinaryPublicId: uploaded.cloudinaryPublicId,
-        ...(galleryImageFit || {}),
         published: true,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       })
-      setGalleryTitle(''); setGalleryCaption(''); setGalleryMediaFile(null); setGalleryImageFit(null); form.reset()
+      setGalleryMediaFile(null); form.reset()
     } catch (reason) {
       onError(uploaded ? `${firebaseMessage(reason)} The media upload succeeded, but its gallery record was not saved; remove the unused asset from Cloudinary.` : firebaseMessage(reason))
     } finally { setGalleryBusy(false) }
@@ -1316,21 +1662,33 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
 
   return <>
     <section className="admin-panel" id="admin-site-media">
-      <div className="admin-panel-head"><div><span className="eyebrow">KEEP YOUR WEBSITE FRESH</span><h2>Website images</h2></div></div>
-      <p className="admin-panel-intro">Choose an image to preview its framing before uploading. Drag the preview or adjust zoom and position controls; the image’s framing is saved with it. Reset a slot to restore its original image. Files must be smaller than 20 MB. Replaced and reset files remain in Cloudinary; delete unused assets from the Cloudinary Media Library.</p>
+      <div className="admin-panel-head admin-collapsible-head"><div><span className="eyebrow">KEEP YOUR WEBSITE FRESH</span><h2>Website images</h2></div><button className="admin-panel-toggle" type="button" aria-expanded={siteMediaExpanded} aria-controls="admin-site-media-content" aria-label={`${siteMediaExpanded ? 'Collapse' : 'Expand'} Website images`} onClick={onToggleSiteMedia}><ChevronDown size={18} /></button></div>
+      {siteMediaExpanded && <div className="admin-panel-body" id="admin-site-media-content">
+      <p className="admin-panel-intro">Choose an image to preview its framing before uploading. Drag the preview or adjust zoom and position controls; the image’s framing is saved with it. Add extra Memories preview cards here, then upload an image and edit the card text to publish them. Reset a slot to restore its original image. Files must be smaller than 20 MB. Replaced and reset files remain in Cloudinary; delete unused assets from the Cloudinary Media Library.</p>
       {siteMediaFeedback && <p className={siteMediaFeedback.error ? 'media-feedback media-feedback-error' : 'media-feedback'} role={siteMediaFeedback.error ? 'alert' : 'status'}>{siteMediaFeedback.message}</p>}
-      <div className="site-media-grid">{SITE_IMAGE_SLOTS.map((slot) => {
+      <div className="site-media-grid">{getSiteImageSlots(siteMedia).map((slot) => {
+        if (slot.type === 'action') return <button
+          className="media-action site-media-add-slot"
+          type="button"
+          key={slot.id}
+          disabled={busySlot !== ''}
+          onClick={() => void (slot.id === 'add-hero-slide' ? addHeroSlot() : addExperienceSlot())}
+        ><Plus size={14} /> {slot.id === 'add-hero-slide' ? 'Add Hero Slide' : 'Add Memories Preview Card'}</button>
         const item = siteMedia[slot.id]
-        const isHeroSlot = slot.id.startsWith('hero-')
-        const isExperienceSlot = slot.id.startsWith('experience-')
-        const defaultHero = photos.hero[Number(slot.id.slice(-1)) - 1] || photos.hero[0]
-        const defaultExperience = photos.experience[Number(slot.id.slice(-1)) - 1] || photos.experience[0]
+        const isHeroSlot = HERO_SLOT_PATTERN.test(slot.id)
+        const isExperienceSlot = EXPERIENCE_SLOT_PATTERN.test(slot.id)
+        const heroSlotMatch = slot.id.match(HERO_SLOT_PATTERN)
+        const defaultHero = heroSlotMatch ? photos.hero[Number(heroSlotMatch[1]) - 1] || photos.hero[0] : photos.hero[0]
+        const experienceSlotMatch = slot.id.match(EXPERIENCE_SLOT_PATTERN)
+        const defaultExperienceCard = experienceSlotMatch ? defaultExperience(Number(experienceSlotMatch[1]) - 1) : photos.experience[0]
         return <article className={`site-media-card ${slot.id === 'brand-logo' ? 'site-media-logo' : ''}`} key={slot.id}>
           <img src={item?.url || defaultSiteImage(slot.id)} alt="" style={imageFitStyle(item)} />
           <div className="site-media-details"><strong>{slot.title}</strong><span>{slot.placement}</span></div>
           <div className="site-media-actions">
             <label className="media-action">{busySlot === slot.id ? 'Uploading…' : 'Upload new image'}<input type="file" accept="image/*" disabled={busySlot !== ''} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) { if (slot.id === 'brand-logo') void replaceSiteImage(slot.id, file, { imagePositionX: 50, imagePositionY: 50, imageZoom: 1 }); else openImagePositioner(file, slot.title, siteImageAspectRatio(slot.id), (fit) => replaceSiteImage(slot.id, file, fit), siteImageMobileAspectRatio(slot.id)) } event.currentTarget.value = '' }} /></label>
             {item && <button className="media-action" disabled={busySlot !== ''} onClick={() => void resetSiteImage(slot.id)}>Reset image</button>}
+            {isHeroSlot && Number(heroSlotMatch?.[1]) > photos.hero.length && <button className="media-action media-action-danger" disabled={busySlot !== ''} onClick={() => void removeHeroSlot(slot.id)}>Remove slide</button>}
+            {isExperienceSlot && Number(experienceSlotMatch?.[1]) > photos.experience.length && <button className="media-action media-action-danger" disabled={busySlot !== ''} onClick={() => void removeExperienceSlot(slot.id)}>Remove card</button>}
           </div>
           {isHeroSlot && <form key={JSON.stringify([slot.id, item?.heroEyebrow, item?.heroHeadline, item?.heroHeadlineEmphasis, item?.heroDescription])} className="hero-copy-form" onSubmit={(event) => void saveHeroCopy(slot.id, event)}>
             <span className="hero-copy-label">SLIDE TEXT</span>
@@ -1341,10 +1699,10 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
             <button className="media-action hero-copy-save" type="submit" disabled={busySlot !== ''}>{busySlot === slot.id ? 'Saving…' : 'Save slide text'}</button>
           </form>}
           {isExperienceSlot && <form key={JSON.stringify([slot.id, item?.experienceTitle, item?.experienceKind, item?.experiencePlace])} className="hero-copy-form" onSubmit={(event) => void saveExperienceCopy(slot.id, event)}>
-            <span className="hero-copy-label">EXPERIENCE CARD TEXT</span>
-            <label>Category / kind<input name="experienceKind" defaultValue={item?.experienceKind || defaultExperience.kind} maxLength={50} required /></label>
-            <label>Card title<input name="experienceTitle" defaultValue={item?.experienceTitle || defaultExperience.title} maxLength={70} required /></label>
-            <label>Location / place<input name="experiencePlace" defaultValue={item?.experiencePlace || defaultExperience.place} maxLength={60} required /></label>
+            <span className="hero-copy-label">MEMORIES PREVIEW CARD TEXT</span>
+            <label>Category / kind<input name="experienceKind" defaultValue={item?.experienceKind || defaultExperienceCard.kind} maxLength={50} required /></label>
+            <label>Card title<input name="experienceTitle" defaultValue={item?.experienceTitle || defaultExperienceCard.title} maxLength={70} required /></label>
+            <label>Location / place<input name="experiencePlace" defaultValue={item?.experiencePlace || defaultExperienceCard.place} maxLength={60} required /></label>
             <button className="media-action hero-copy-save" type="submit" disabled={busySlot !== ''}>{busySlot === slot.id ? 'Saving…' : 'Save card text'}</button>
           </form>}
         </article>
@@ -1358,17 +1716,16 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
           {(trip.cloudinaryPublicId || trip.image !== (trip.originalImage || photos.experience[0].image)) && <button className="media-action" onClick={() => void onResetEventImage(trip)}>Reset image</button>}
         </div>)}
       </div>
+      </div>}
     </section>
     <section className="admin-panel" id="admin-gallery">
-      <div className="admin-panel-head"><div><span className="eyebrow">REAL MOMENTS, SHARED WITH CARE</span><h2>Memories gallery</h2></div></div>
-      <p className="admin-panel-intro">Create an event or trip playlist with a cover image, then add its photos and videos below. Published playlists and their media appear on the public Memories page. Files must be smaller than 20 MB; Cloudinary assets must be deleted separately when no longer needed.</p>
+      <div className="admin-panel-head admin-collapsible-head"><div><span className="eyebrow">REAL MOMENTS, SHARED WITH CARE</span><h2>Memories gallery</h2></div><button className="admin-panel-toggle" type="button" aria-expanded={galleryExpanded} aria-controls="admin-gallery-content" aria-label={`${galleryExpanded ? 'Collapse' : 'Expand'} Memories gallery`} onClick={onToggleGallery}><ChevronDown size={18} /></button></div>
+      {galleryExpanded && <div className="admin-panel-body" id="admin-gallery-content">
+      <p className="admin-panel-intro">Create an event or trip playlist with a cover image, then add its photos and videos below. Memories keep their uploaded aspect ratio without cropping or reframing. Published playlists and their media appear on the public Memories page. Files must be smaller than 20 MB; Cloudinary assets must be deleted separately when no longer needed.</p>
       <form className="gallery-upload-form" onSubmit={addGalleryMedia}>
-        <label>Event or trip playlist<select value={selectedAlbumId} onChange={(event) => setSelectedAlbumId(event.target.value)} required disabled={galleryAlbums.filter((album) => album.published).length === 0}><option value="">Choose a playlist</option>{galleryAlbums.filter((album) => album.published).map((album) => <option value={album.id} key={album.id}>{album.title}</option>)}</select></label>
-        <label>Memory title<input value={galleryTitle} onChange={(event) => setGalleryTitle(event.target.value)} required maxLength={80} placeholder="e.g. Our weekend in Cape Coast" /></label>
-        <label>Caption (optional)<input value={galleryCaption} onChange={(event) => setGalleryCaption(event.target.value)} maxLength={180} placeholder="A short note about this moment" /></label>
-        <label className="gallery-file-input">Photo or video<input type="file" name="galleryFile" accept="image/*,video/*" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file) return; if (file.type.startsWith('image/')) { setGalleryMediaFile(null); setGalleryImageFit(null); openImagePositioner(file, 'Memories gallery photo', 345 / 325, async (fit) => { setGalleryMediaFile(file); setGalleryImageFit(fit); return true }, 1) } else { setGalleryMediaFile(file); setGalleryImageFit(null) } event.currentTarget.value = '' }} /></label>
-        {galleryMediaFile && <span className="gallery-selected-file">{galleryMediaFile.name}{galleryImageFit && ' · framing ready'}</span>}
-        <button className="button button-burgundy" disabled={galleryBusy}>{galleryBusy ? 'Uploading…' : 'Add to Memories'} <Plus size={15} /></button>
+        <label>Choose a playlist<select value={selectedAlbumId} onChange={(event) => setSelectedAlbumId(event.target.value)} required disabled={galleryAlbums.filter((album) => album.published).length === 0}><option value="">Select playlist</option>{galleryAlbums.filter((album) => album.published).map((album) => <option value={album.id} key={album.id}>{album.title}</option>)}</select></label>
+        <label className="gallery-file-input">Photo or video<input type="file" name="galleryFile" accept="image/*,video/*" required onChange={(event) => setGalleryMediaFile(event.currentTarget.files?.[0] || null)} /></label>
+        <button className="button button-burgundy" disabled={galleryBusy || !selectedAlbumId || !galleryMediaFile}>{galleryBusy ? 'Uploading…' : 'Add to Memories'} <Plus size={15} /></button>
       </form>
       <form className="gallery-playlist-form" onSubmit={createGalleryAlbum}>
         <div className="gallery-playlist-heading"><span className="eyebrow">ORGANIZE YOUR STORIES</span><h3>Create an event or trip playlist</h3><p>Each playlist gets its own cover and a page for all the photos and videos from that escape.</p></div>
@@ -1388,12 +1745,13 @@ function AdminMediaPanel({ siteMedia, galleryItems, galleryAlbums, events, onRep
         </article>
       })}</div>
       <div className="gallery-admin-grid">{galleryItems.length === 0 ? <div className="admin-empty">No memories added yet. Create a playlist and upload its photos or videos above.</div> : galleryItems.map((item) => <article className="gallery-admin-card" key={item.id}>
-        {item.type === 'video' ? <video src={item.url} controls preload="metadata" /> : <img src={item.url} alt={item.title} style={imageFitStyle(item)} />}
-        <div><strong>{item.title}</strong>{item.caption && <p>{item.caption}</p>}<span>{item.type} · {item.published ? 'Visible on website' : 'Hidden from website'}</span>
-          <select aria-label={`Playlist for ${item.title}`} value={item.albumId || ''} onChange={(event) => void assignGalleryMedia(item, event.target.value)}><option value="" disabled>{item.albumId ? 'Choose playlist' : 'Unassigned legacy memory'}</option>{galleryAlbums.map((album) => <option value={album.id} key={album.id}>{album.title}</option>)}</select>
+        {item.type === 'video' ? <video src={item.url} controls preload="metadata" /> : <img src={item.url} alt={item.title} />}
+        <div><strong>{item.type === 'video' ? 'Video' : 'Photo'}</strong><span>{item.published ? 'Visible on website' : 'Hidden from website'}</span>
+          <select aria-label={`Playlist for ${item.type === 'video' ? 'video' : 'photo'}`} value={item.albumId || ''} onChange={(event) => void assignGalleryMedia(item, event.target.value)}><option value="" disabled>{item.albumId ? 'Choose playlist' : 'Unassigned legacy memory'}</option>{galleryAlbums.map((album) => <option value={album.id} key={album.id}>{album.title}</option>)}</select>
         </div>
         <div className="gallery-admin-actions"><button className="media-action" onClick={() => void setGalleryPublished(item)}>{item.published ? 'Hide' : 'Publish'}</button><button className="media-action media-action-danger" onClick={() => void removeGalleryItem(item)}>Remove</button></div>
       </article>)}</div>
+      </div>}
     </section>
     {cropRequest && <ImagePositionDialog key={cropRequest.file.name + cropRequest.file.lastModified} file={cropRequest.file} title={cropRequest.title} aspectRatio={cropRequest.aspectRatio} mobileAspectRatio={cropRequest.mobileAspectRatio} onClose={() => setCropRequest(null)} onSave={cropRequest.onSave} />}
   </>
@@ -1406,6 +1764,8 @@ function AdminPage({ user, authReady }: { user: User | null; authReady: boolean 
   const [siteMedia, setSiteMedia] = useState<Record<string, SiteMedia>>({})
   const [galleryItems, setGalleryItems] = useState<GalleryMedia[]>([])
   const [galleryAlbums, setGalleryAlbums] = useState<GalleryAlbum[]>([])
+  const [userProfiles, setUserProfiles] = useState<UserProfile[]>([])
+  const [usersLoaded, setUsersLoaded] = useState(false)
   const [conversations, setConversations] = useState<Record<string, unknown>[]>([])
   const [activeConversation, setActiveConversation] = useState<string | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
@@ -1416,19 +1776,27 @@ function AdminPage({ user, authReady }: { user: User | null; authReady: boolean 
   const [createTripImage, setCreateTripImage] = useState<{ file: File; fit: ImageFit } | null>(null)
   const [createTripCropFile, setCreateTripCropFile] = useState<File | null>(null)
   const [authOpen, setAuthOpen] = useState(false)
+  const [expandedPanels, setExpandedPanels] = useState({ siteMedia: false, gallery: false, inbox: false })
   useEffect(() => {
     if (!user) { setIsAdmin(false); setChecking(false); return }
     setChecking(true)
     user.reload().then(() => user.getIdTokenResult(true)).then((token) => setIsAdmin(user.email?.toLowerCase() === ADMIN_EMAIL && token.claims.email_verified === true)).catch((reason) => { console.error('Unable to verify admin access:', reason); setAdminError('We couldn’t verify your access. Please try again.') }).finally(() => setChecking(false))
   }, [user])
   useEffect(() => {
+    if (!user || !isAdmin) setExpandedPanels({ siteMedia: false, gallery: false, inbox: false })
+  }, [user, isAdmin])
+  useEffect(() => {
     if (!db || !isAdmin) return
     const stopTrips = onSnapshot(query(collection(db, 'events'), orderBy('startDate', 'asc')), (snap) => setTrips(snap.docs.map((item) => ({ id: item.id, ...item.data() } as Trip))), (reason) => { console.error('Unable to load events:', reason); setAdminError('Unable to load events.') })
+    const stopUsers = onSnapshot(collection(db, 'users'), (snap) => {
+      setUserProfiles(snap.docs.map((item) => ({ uid: item.id, ...item.data() } as UserProfile)).sort((a, b) => (a.displayName || a.email || '').localeCompare(b.displayName || b.email || '')))
+      setUsersLoaded(true)
+    }, (reason) => { console.error('Unable to load registered users:', reason); setAdminError('Unable to load registered users.') })
     const stopChats = onSnapshot(query(collection(db, 'conversations'), orderBy('updatedAt', 'desc')), (snap) => setConversations(snap.docs.map((item) => ({ id: item.id, ...item.data() }))), (reason) => { console.error('Unable to load conversations:', reason); setAdminError('Unable to load conversations.') })
     const stopSiteMedia = onSnapshot(collection(db, 'websiteContent'), (snap) => setSiteMedia(Object.fromEntries(snap.docs.map((item) => [item.id, { id: item.id, ...item.data() } as SiteMedia]))), (reason) => { console.error('Unable to load website media in admin:', reason); setAdminError('Unable to load website media.') })
     const stopGallery = onSnapshot(collection(db, 'galleryMedia'), (snap) => setGalleryItems(snap.docs.map((item) => ({ id: item.id, ...item.data() } as GalleryMedia)).sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0))), (reason) => { console.error('Unable to load gallery media in admin:', reason); setAdminError('Unable to load memories gallery.') })
     const stopGalleryAlbums = onSnapshot(collection(db, 'galleryAlbums'), (snap) => setGalleryAlbums(snap.docs.map((item) => ({ id: item.id, ...item.data() } as GalleryAlbum)).sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0))), (reason) => { console.error('Unable to load memories playlists in admin:', reason); setAdminError('Unable to load memories playlists.') })
-    return () => { stopTrips(); stopChats(); stopSiteMedia(); stopGallery(); stopGalleryAlbums() }
+    return () => { stopTrips(); stopUsers(); stopChats(); stopSiteMedia(); stopGallery(); stopGalleryAlbums() }
   }, [isAdmin])
   useEffect(() => {
     if (!db || !isAdmin || !activeConversation) { setChatMessages([]); return }
@@ -1489,17 +1857,30 @@ function AdminPage({ user, authReady }: { user: User | null; authReady: boolean 
       setReply('')
     } catch (reason) { setAdminError(firebaseMessage(reason)) }
   }
+  const toggleAdminPanel = (panel: keyof typeof expandedPanels) => {
+    setExpandedPanels((current) => ({ ...current, [panel]: !current[panel] }))
+  }
+  const openAdminPanel = (panel: keyof typeof expandedPanels) => {
+    setExpandedPanels((current) => ({ ...current, [panel]: true }))
+  }
   return <div className="admin-app">
-    <aside className="admin-sidebar"><Brand inverse /><span className="admin-label">WORKSPACE</span><a className="admin-nav-active" href="#overview"><Compass size={17} /> Overview</a><a href="#admin-trips"><CalendarDays size={17} /> Events & trips</a><a href="#admin-site-media"><Sparkles size={17} /> Website images</a><a href="#admin-gallery"><MoveUpRight size={17} /> Memories gallery</a><a href="#admin-inbox"><MessageCircle size={17} /> Guest messages <span>{conversations.length || ''}</span></a><div className="admin-sidebar-bottom"><a href="/"><ArrowLeft size={16} /> View website</a>{user && <button onClick={() => void logout()}>Sign out</button>}</div></aside>
+    <aside className="admin-sidebar"><Brand inverse /><span className="admin-label">WORKSPACE</span><a className="admin-nav-active" href="#overview"><Compass size={17} /> Overview</a><a href="#admin-trips"><CalendarDays size={17} /> Events & trips</a><a href="#admin-users"><Users size={17} /> Users <span>{usersLoaded ? userProfiles.length : ''}</span></a><a href="#admin-site-media" onClick={() => openAdminPanel('siteMedia')}><img className="admin-nav-brand-icon" src="/images/Weblogo.png" alt="" /> Website images</a><a href="#admin-gallery" onClick={() => openAdminPanel('gallery')}><MoveUpRight size={17} /> Memories gallery</a><a href="#admin-inbox" onClick={() => openAdminPanel('inbox')}><MessageCircle size={17} /> Guest messages <span>{conversations.length || ''}</span></a><div className="admin-sidebar-bottom"><a href="/"><ArrowLeft size={16} /> View website</a>{user && <button onClick={() => void logout()}>Sign out</button>}</div></aside>
     <main className="admin-main">
       <div className="admin-topbar"><div><span>YOUR WORKSPACE</span><h1>Good things happen here.</h1></div><div className="admin-user"><span>{user?.displayName || user?.email || 'Guest'}</span><div>{user?.displayName?.[0] || 'L'}</div></div></div>
       {!authReady || checking ? <div className="admin-gate">Verifying your access…</div> : !user ? <div className="admin-gate"><ShieldCheck size={32} /><h2>Just for the LUX ESCAPE team.</h2><p>Sign in with an administrator account to continue.</p><button className="button button-burgundy" onClick={() => setAuthOpen(true)}>Sign in <ArrowRight size={15} /></button></div> : !isAdmin ? <div className="admin-gate"><ShieldCheck size={32} /><h2>Administrator access only.</h2><p>This account does not have the required admin role. Ask your Firebase project administrator to grant access.</p><button className="button button-burgundy" onClick={() => void logout()}>Sign out <ArrowRight size={15} /></button></div> : <div className="admin-content" id="overview">
         <div className="admin-welcome"><span className="eyebrow">A GOOD MORNING TO YOU</span><h2>Welcome to your escape desk.</h2><p>A clear view of what’s happening, right now.</p></div>
         {adminError && <p className="form-error">{adminError}</p>}
-        <div className="admin-stats"><div><span>PUBLISHED TRIPS</span><strong>{trips.filter((trip) => trip.published).length}</strong><small><CalendarDays size={14} /> Live on your website</small></div><div><span>GUEST CONVERSATIONS</span><strong>{conversations.length}</strong><small><MessageCircle size={14} /> Saved and ready for you</small></div><div><span>PLACES RESERVED</span><strong>{trips.reduce((total, trip) => total + Number(trip.reservedSeats || 0), 0)}</strong><small><Users size={14} /> Across all events</small></div></div>
+        <div className="admin-stats"><div><span>PUBLISHED TRIPS</span><strong>{trips.filter((trip) => trip.published).length}</strong><small><CalendarDays size={14} /> Live on your website</small></div><div><span>GUEST CONVERSATIONS</span><strong>{conversations.length}</strong><small><MessageCircle size={14} /> Saved and ready for you</small></div><div><span>PLACES RESERVED</span><strong>{trips.reduce((total, trip) => total + Number(trip.reservedSeats || 0), 0)}</strong><small><Users size={14} /> Across all events</small></div><div><span>REGISTERED USERS</span><strong>{usersLoaded ? userProfiles.length : '—'}</strong><small><Users size={14} /> Accounts on LUX ESCAPE</small></div></div>
         <section className="admin-panel" id="admin-trips"><div className="admin-panel-head"><div><span className="eyebrow">KEEP THE GOOD THINGS COMING</span><h2>Upcoming events & trips</h2></div><button className="button button-burgundy" onClick={() => { setAdminError(''); setShowCreate(true) }}><Plus size={16} /> Add an event or trip</button></div>{trips.length === 0 ? <div className="admin-empty">Nothing published yet. Add an event or trip to share it with the world.</div> : <div className="admin-trip-list">{trips.map((trip) => <div className="admin-trip-row" key={trip.id}><img src={trip.image || photos.experience[0].image} alt="" style={imageFitStyle(trip)} /><div><strong>{trip.title}</strong><span>{trip.destination} · {trip.startDate || 'Date TBC'}</span></div><span className={trip.published ? 'published-badge' : 'draft-badge'}>{trip.published ? 'Published' : 'Draft'}</span><span className="admin-capacity">{Math.max(0, trip.capacity - (trip.reservedSeats || 0))} places left</span></div>)}</div>}</section>
-        <AdminMediaPanel siteMedia={siteMedia} galleryItems={galleryItems} galleryAlbums={galleryAlbums} events={trips} onReplaceEventImage={replaceEventImage} onResetEventImage={resetEventImage} onError={setAdminError} />
-        <section className="admin-panel" id="admin-inbox"><div className="admin-panel-head"><div><span className="eyebrow">REAL PEOPLE. REAL CONVERSATIONS.</span><h2>Guest messages</h2></div></div><div className="admin-inbox-layout"><div className="admin-conversation-list">{conversations.length === 0 ? <p className="admin-empty">No conversations yet.</p> : conversations.map((item) => <button className={`admin-conversation ${activeConversation === item.id ? 'selected' : ''}`} key={String(item.id)} onClick={() => setActiveConversation(String(item.id))}><span className="admin-chat-avatar">{String(item.userName || 'G')[0]}</span><span><strong>{String(item.userName || 'Guest')}</strong><small>{String(item.lastMessage || item.userEmail || 'New conversation')}</small></span></button>)}</div><div className="admin-chat-view">{activeConversation ? <><div className="admin-chat-messages">{chatMessages.map((message) => <div className={`chat-bubble ${message.senderId === user.uid ? 'chat-mine' : 'chat-theirs'}`} key={message.id}><p>{message.text}</p><time>{message.createdAt?.toDate().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) || ''}</time></div>)}</div><form className="admin-reply" onSubmit={sendReply}><input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a thoughtful reply…" /><button type="submit" disabled={!reply.trim()}><ArrowUpRight size={17} /></button></form></> : <div className="admin-empty">Choose a conversation to say hello.</div>}</div></div></section>
+        <section className="admin-panel" id="admin-users"><div className="admin-panel-head"><div><span className="eyebrow">YOUR LUX ESCAPE COMMUNITY</span><h2>Users <span className="admin-users-total">{usersLoaded ? userProfiles.length : '…'}</span></h2></div></div>{!usersLoaded ? <div className="admin-empty">Loading registered users…</div> : userProfiles.length === 0 ? <div className="admin-empty">No registered users yet.</div> : <div className="admin-users-list">{userProfiles.map((profile) => {
+          const visitCount = Number.isFinite(profile.visitCount) ? Math.max(0, Number(profile.visitCount)) : 0
+          return <details className="admin-user-entry" key={profile.uid}>
+            <summary><span className="admin-user-name">{profile.displayName || 'Unnamed user'}</span><span className="admin-user-visits" title="Visits recorded while this user is signed in">{visitCount} {visitCount === 1 ? 'visit' : 'visits'}</span><ChevronDown size={16} /></summary>
+            <div className="admin-user-details"><p><strong>Name</strong><span>{profile.displayName || 'Not provided'}</span></p><p><strong>Email</strong><span>{profile.email || 'Not provided'}</span></p>{profile.phone && <p><strong>Phone</strong><span>{profile.phone}</span></p>}</div>
+          </details>
+        })}</div>}</section>
+        <AdminMediaPanel siteMedia={siteMedia} galleryItems={galleryItems} galleryAlbums={galleryAlbums} events={trips} siteMediaExpanded={expandedPanels.siteMedia} galleryExpanded={expandedPanels.gallery} onToggleSiteMedia={() => toggleAdminPanel('siteMedia')} onToggleGallery={() => toggleAdminPanel('gallery')} onReplaceEventImage={replaceEventImage} onResetEventImage={resetEventImage} onError={setAdminError} />
+        <section className="admin-panel" id="admin-inbox"><div className="admin-panel-head admin-collapsible-head"><div><span className="eyebrow">REAL PEOPLE. REAL CONVERSATIONS.</span><h2>Guest messages</h2></div><button className="admin-panel-toggle" type="button" aria-expanded={expandedPanels.inbox} aria-controls="admin-inbox-content" aria-label={`${expandedPanels.inbox ? 'Collapse' : 'Expand'} Guest messages`} onClick={() => toggleAdminPanel('inbox')}><ChevronDown size={18} /></button></div>{expandedPanels.inbox && <div className="admin-panel-body" id="admin-inbox-content"><div className="admin-inbox-layout"><div className="admin-conversation-list">{conversations.length === 0 ? <p className="admin-empty">No conversations yet.</p> : conversations.map((item) => <button className={`admin-conversation ${activeConversation === item.id ? 'selected' : ''}`} key={String(item.id)} onClick={() => setActiveConversation(String(item.id))}><span className="admin-chat-avatar">{String(item.userName || 'G')[0]}</span><span><strong>{String(item.userName || 'Guest')}</strong><small>{String(item.lastMessage || item.userEmail || 'New conversation')}</small></span></button>)}</div><div className="admin-chat-view">{activeConversation ? <><div className="admin-chat-messages">{chatMessages.map((message) => <div className={`chat-bubble ${message.senderId === user.uid ? 'chat-mine' : 'chat-theirs'}`} key={message.id}><p>{message.text}</p><time>{message.createdAt?.toDate().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) || ''}</time></div>)}</div><form className="admin-reply" onSubmit={sendReply}><input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a thoughtful reply…" /><button type="submit" disabled={!reply.trim()}><ArrowUpRight size={17} /></button></form></> : <div className="admin-empty">Choose a conversation to say hello.</div>}</div></div></div>}</section>
       </div>}
     </main>
     <AnimatePresence>{authOpen && <AuthModal initialMode="login" returnTo="/admin" adminOnly close={() => setAuthOpen(false)} />}</AnimatePresence>
