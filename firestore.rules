@@ -1,0 +1,154 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email == 'luxescape111@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function owns(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if owns(uid) || isAdmin();
+      allow create: if owns(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.keys().hasOnly(['uid', 'displayName', 'email', 'phone', 'createdAt'])
+        && request.resource.data.createdAt == request.time;
+      allow update: if owns(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['displayName', 'phone', 'photoURL', 'updatedAt'])
+        && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt == request.time);
+      allow delete: if isAdmin();
+    }
+
+    match /events/{eventId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reservedSeats', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.reservedSeats > resource.data.reservedSeats
+        && request.resource.data.reservedSeats <= resource.data.capacity
+        && existsAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId))
+        && !exists(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId))
+        && getAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId)).data.userId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId)).data.eventId == eventId
+        && getAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId)).data.participants == request.resource.data.reservedSeats - resource.data.reservedSeats
+        && getAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId)).data.status == 'Pending'
+        && getAfter(/databases/$(database)/documents/bookings/$(request.auth.uid + '_' + eventId)).data.paymentStatus == 'Unpaid'
+      );
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if (signedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow create: if signedIn()
+        && bookingId == request.auth.uid + '_' + request.resource.data.eventId
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['userId', 'userName', 'userEmail', 'eventId', 'eventTitle', 'participants', 'amount', 'currency', 'status', 'paymentStatus', 'reference', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['userId', 'userName', 'userEmail', 'eventId', 'eventTitle', 'participants', 'amount', 'currency', 'status', 'paymentStatus', 'reference', 'createdAt'])
+        && request.resource.data.participants is int
+        && request.resource.data.participants > 0
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.paymentStatus == 'Unpaid'
+        && request.resource.data.currency == 'GHS'
+        && request.resource.data.createdAt == request.time
+        && exists(/databases/$(database)/documents/events/$(request.resource.data.eventId))
+        && get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.published == true
+        && request.resource.data.amount == get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.price * request.resource.data.participants
+        && getAfter(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.reservedSeats
+          == get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.reservedSeats + request.resource.data.participants;
+      allow update, delete: if isAdmin();
+    }
+
+    match /conversations/{conversationId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.keys().hasOnly(['userId', 'userName', 'userEmail', 'status', 'unreadForAdmin', 'createdAt', 'updatedAt'])
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        || (signedIn()
+          && resource.data.userId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'updatedAt', 'unreadForAdmin'])
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.unreadForAdmin == 1);
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        function ownsConversation() {
+          return signedIn()
+            && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+        }
+
+        allow read: if isAdmin() || ownsConversation();
+        allow create: if (isAdmin() || ownsConversation())
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.type == 'text'
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 4000
+          && request.resource.data.read == false
+          && request.resource.data.createdAt == request.time;
+        allow update: if isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /experiences/{experienceId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /destinations/{destinationId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /galleryAlbums/{albumId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /galleryMedia/{mediaId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /testimonials/{testimonialId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /websiteContent/{contentId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    match /adminActivityLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+  }
+}
