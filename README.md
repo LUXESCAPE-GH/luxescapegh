@@ -37,6 +37,7 @@ Public content collections are designed for admin-managed publishing. The initia
 
 ## Deployment and service setup
 
+- On Render, deploy this repository as a **Static Site**, not a Web Service. The root `render.yaml` defines the `npm ci && npm run build` command, publishes `dist`, and rewrites client-side routes to `index.html`. If a Web Service already exists for this repository, create a Static Site from the Blueprint or select **Static Site** when creating the service; a Web Service will continue to run its configured start command.
 - Set Firebase configuration in the hosting provider's environment variables (the `VITE_` values are public web-app configuration, not service-account credentials).
 - Deploy Firestore rules and indexes with the Firebase CLI: `firebase deploy --only firestore:rules,firestore:indexes`.
 - Enable Firebase App Check for production and configure an appropriate reCAPTCHA provider.
