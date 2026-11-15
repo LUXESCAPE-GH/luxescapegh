@@ -11,7 +11,7 @@ import {
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, Check, ChevronDown,
   Compass, MapPin, Menu, MessageCircle,
-  Minus, MoveUpRight, Pause, Play, Plus, ShieldCheck, Users, X,
+  Minus, MoveUpRight, Plus, ShieldCheck, Users, X,
 } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { BrowserRouter, Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -473,7 +473,6 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
   const [slide, setSlide] = useState(0)
   const [memoriesIndex, setMemoriesIndex] = useState(0)
   const [memoriesStep, setMemoriesStep] = useState(450)
-  const [memoriesPaused, setMemoriesPaused] = useState(false)
   const [memoriesHovered, setMemoriesHovered] = useState(false)
   const heroSwipe = useRef<{ x: number; y: number; pointerId: number } | null>(null)
   const memoriesSwipe = useRef<{ x: number; y: number; pointerId: number } | null>(null)
@@ -568,10 +567,10 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
   }, [allExperiencePhotos.length])
 
   useEffect(() => {
-    if (reducedMotion || memoriesPaused || memoriesHovered || allExperiencePhotos.length < 2) return
+    if (reducedMotion || memoriesHovered || allExperiencePhotos.length < 2) return
     const timer = window.setTimeout(() => setMemoriesIndex((index) => (index + 1) % allExperiencePhotos.length), 4800)
     return () => window.clearTimeout(timer)
-  }, [allExperiencePhotos.length, memoriesHovered, memoriesPaused, memoriesIndex, reducedMotion])
+  }, [allExperiencePhotos.length, memoriesHovered, memoriesIndex, reducedMotion])
 
   useEffect(() => {
     const stage = memoriesStage.current
@@ -696,11 +695,6 @@ function HomePage({ user, authReady }: { user: User | null; authReady: boolean }
         <div className="page-width">
           <div className="section-heading memories-section-heading">
             <h2>Find your kind<br />of <em>somewhere.</em></h2>
-            <div className="memories-slider-controls" aria-label="Scroll memories">
-              <button type="button" onClick={() => moveMemories(-1)} aria-label="Previous memory"><ArrowLeft size={17} /></button>
-              <button type="button" onClick={() => setMemoriesPaused((paused) => !paused)} disabled={Boolean(reducedMotion)} aria-label={reducedMotion ? 'Carousel paused due to reduced-motion preference' : memoriesPaused ? 'Play memories carousel' : 'Pause memories carousel'}>{memoriesPaused || reducedMotion ? <Play size={15} /> : <Pause size={15} />}</button>
-              <button type="button" onClick={() => moveMemories(1)} aria-label="Next memory"><ArrowRight size={17} /></button>
-            </div>
           </div>
           <div
             className="memories-carousel-stage"

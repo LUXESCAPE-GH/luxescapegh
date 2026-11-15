@@ -119,9 +119,6 @@ img { display: block; max-width: 100%; }
 .section-heading > p { max-width: 300px; margin-bottom: 6px; }
 .memories-section-heading { position: relative; display: block; padding: 0 72px; text-align: center; }
 .memories-section-heading h2 { margin-top: 0; }
-.memories-slider-controls { position: absolute; top: 50%; right: 0; display: flex; gap: 8px; transform: translateY(-50%); }
-.memories-slider-controls button { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid #cfc6ba; border-radius: 50%; color: var(--wine); background: transparent; cursor: pointer; transition: color .2s, background .2s, border-color .2s; }
-.memories-slider-controls button:hover { border-color: var(--wine); color: white; background: var(--wine); }
 .memories-carousel-stage { --memories-gap: 16px; position: relative; height: 480px; overflow: hidden; perspective: 1300px; cursor: grab; touch-action: pan-y; }
 .memories-carousel-stage:active { cursor: grabbing; }
 .memories-carousel-item { position: absolute; top: 50%; left: 50%; width: clamp(320px, 42vw, 470px); transform-style: preserve-3d; transform-origin: center; will-change: transform, opacity; }
@@ -556,6 +553,7 @@ img { display: block; max-width: 100%; }
 }
 @media (max-width: 720px) {
   .page-width { width: calc(100% - 42px); }
+  .hero-content { transform: translateY(clamp(28px, 7svh, 54px)); }
   .site-header { height: 69px; }
   .nav-shell { width: calc(100% - 38px); }
   .brand-logo-frame { width: 148px; height: 37px; }
@@ -614,14 +612,13 @@ img { display: block; max-width: 100%; }
   .section-heading h2, .trip-detail-main h2 { font-size: clamp(39px, 10vw, 55px); }
   .experiences-section { padding: 67px 0 66px; }
   .section-heading { display: block; margin-bottom: 25px; }
-  .memories-section-heading { padding: 0 0 54px; }
-  .memories-slider-controls { top: auto; right: 50%; bottom: 0; transform: translateX(50%); }
+  .memories-section-heading { padding: 0; }
   .section-heading h2 { margin-top: 14px; }
   .memories-section-heading h2 { margin-top: 0; }
   .section-heading > p { margin-top: 13px; font-size: 11px; }
-  .memories-carousel-stage { --memories-gap: 10px; height: 330px; margin-inline: -21px; }
-  .memories-carousel-item { width: min(82vw, 360px); }
-  .experience-card { height: 285px; }
+  .memories-carousel-stage { --memories-gap: 12px; height: 390px; margin-inline: -21px; perspective: 1000px; }
+  .memories-carousel-item { width: min(76vw, 360px); }
+  .experience-card { height: 340px; }
   .experience-index, .experience-kind { top: 13px; font-size: 6px; letter-spacing: 1px; }
   .experience-index { left: 12px; }
   .experience-kind { right: 12px; }
