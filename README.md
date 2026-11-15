@@ -37,7 +37,7 @@ Public content collections are designed for admin-managed publishing. The initia
 
 ## Deployment and service setup
 
-- On Render, deploy this repository as a **Static Site**, not a Web Service. The root `render.yaml` defines the `npm ci && npm run build` command, publishes `dist`, and rewrites client-side routes to `index.html`. If a Web Service already exists for this repository, create a Static Site from the Blueprint or select **Static Site** when creating the service; a Web Service will continue to run its configured start command.
+- On Render, deploy this repository as a **Static Site**, not a Web Service. The root `render.yaml` defines the `npm ci && npm run build` command, publishes `dist`, and rewrites client-side routes to `index.html`. The build also creates `dist/404.html` as a fallback so React Router can render deep links if the hosting rewrite is unavailable. If a Web Service already exists for this repository, create a Static Site from the Blueprint or select **Static Site** when creating the service; a Web Service will continue to run its configured start command.
 - Render Static Sites are served from its CDN and do not spin down due to inactivity, so a keep-awake ping is unnecessary. Client-side code cannot ping while no visitor has the site open. If deploying a separate sleeping Web Service instead, configure an external uptime monitor for that service URL.
 - Set Firebase configuration in the hosting provider's environment variables (the `VITE_` values are public web-app configuration, not service-account credentials).
 - Deploy Firestore rules and indexes with the Firebase CLI: `firebase deploy --only firestore:rules,firestore:indexes`.
